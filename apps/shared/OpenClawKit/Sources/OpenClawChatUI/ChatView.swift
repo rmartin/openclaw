@@ -202,8 +202,12 @@ public struct OpenClawChatView: View {
 
         if self.viewModel.pendingRunCount > 0 {
             HStack {
-                ChatTypingIndicatorBubble(style: self.style)
-                    .equatable()
+                ChatTypingIndicatorBubble(
+                    style: self.style,
+                    thinkingText: self.viewModel.streamingThinkingText,
+                    startedAt: self.viewModel.pendingRunStartedAt,
+                    lastActivityAt: self.viewModel.pendingRunLastActivityAt,
+                    lastToolName: self.viewModel.pendingRunLastToolName)
                 Spacer(minLength: 0)
             }
         }

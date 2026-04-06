@@ -33,6 +33,10 @@ public final class OpenClawChatViewModel {
     public private(set) var sessionKey: String
     public private(set) var sessionId: String?
     public private(set) var streamingAssistantText: String?
+    public private(set) var streamingThinkingText: String?
+    public private(set) var pendingRunStartedAt: Date?
+    public private(set) var pendingRunLastActivityAt: Date?
+    public private(set) var pendingRunLastToolName: String?
     public private(set) var pendingToolCalls: [OpenClawChatPendingToolCall] = []
     public private(set) var sessions: [OpenClawChatSessionEntry] = []
     private let transport: any OpenClawChatTransport
@@ -48,7 +52,10 @@ public final class OpenClawChatViewModel {
 
     @ObservationIgnored
     private nonisolated(unsafe) var pendingRunTimeoutTasks: [String: Task<Void, Never>] = [:]
-    private let pendingRunTimeoutMs: UInt64 = 120_000
+    // Idle timeout: how long the client waits without ANY agent/chat activity before
+    // declaring a run timed out. The timeout is rearmed whenever an event arrives for
+    // the run, so genuinely long-running tasks that keep streaming progress stay alive.
+    private let pendingRunIdleTimeoutMs: UInt64 = 180_000
     // Session switches can overlap in-flight picker patches, so stale completions
     // must compare against the latest request and latest desired value for that session.
     private var nextModelSelectionRequestID: UInt64 = 0
@@ -223,6 +230,7 @@ public final class OpenClawChatViewModel {
         self.clearPendingRuns(reason: nil)
         self.pendingToolCallsById = [:]
         self.streamingAssistantText = nil
+        self.streamingThinkingText = nil
         self.sessionId = nil
         defer { self.isLoading = false }
         do {
@@ -502,6 +510,7 @@ public final class OpenClawChatViewModel {
         self.armPendingRunTimeout(runId: runId)
         self.pendingToolCallsById = [:]
         self.streamingAssistantText = nil
+        self.streamingThinkingText = nil
 
         // Optimistically append user message to UI.
         var userContent: [OpenClawChatMessageContent] = [
@@ -995,9 +1004,12 @@ public final class OpenClawChatViewModel {
             }
             self.pendingToolCallsById = [:]
             self.streamingAssistantText = nil
+            self.streamingThinkingText = nil
+            self.pendingRunLastToolName = nil
             Task { await self.refreshHistoryAfterRun() }
         default:
-            break
+            // Non-terminal chat event for our run still proves the server is alive.
+            self.noteRunActivity()
         }
     }
 
@@ -1021,10 +1033,24 @@ public final class OpenClawChatViewModel {
             return
         }
 
+        // Any agent event for a run we are tracking counts as activity. Reset the
+        // idle timeout so long-running tasks that keep emitting events do not get
+        // reaped just because the model has not produced a final reply yet.
+        self.noteRunActivity()
+
         switch evt.stream {
         case "assistant":
             if let text = evt.data["text"]?.value as? String {
                 self.streamingAssistantText = text
+            }
+        case "thinking", "reasoning":
+            // Render the model's running thinking instead of leaving the user to
+            // stare at bouncing dots. Prefer the cumulative `text`; fall back to
+            // appending the delta when only the delta is provided.
+            if let text = evt.data["text"]?.value as? String, !text.isEmpty {
+                self.streamingThinkingText = text
+            } else if let delta = evt.data["delta"]?.value as? String, !delta.isEmpty {
+                self.streamingThinkingText = (self.streamingThinkingText ?? "") + delta
             }
         case "tool":
             guard let phase = evt.data["phase"]?.value as? String else { return }
@@ -1038,8 +1064,10 @@ public final class OpenClawChatViewModel {
                     args: args,
                     startedAt: evt.ts.map(Double.init) ?? Date().timeIntervalSince1970 * 1000,
                     isError: nil)
+                self.pendingRunLastToolName = name
             } else if phase == "result" {
                 self.pendingToolCallsById[toolCallId] = nil
+                self.pendingRunLastToolName = name
             }
         default:
             break
@@ -1064,16 +1092,46 @@ public final class OpenClawChatViewModel {
     }
 
     private func armPendingRunTimeout(runId: String) {
+        let now = Date()
+        if self.pendingRunStartedAt == nil {
+            self.pendingRunStartedAt = now
+        }
+        self.pendingRunLastActivityAt = now
         self.pendingRunTimeoutTasks[runId]?.cancel()
         self.pendingRunTimeoutTasks[runId] = Task { [weak self] in
-            let timeoutMs = await MainActor.run { self?.pendingRunTimeoutMs ?? 0 }
+            let timeoutMs = await MainActor.run { self?.pendingRunIdleTimeoutMs ?? 0 }
             try? await Task.sleep(nanoseconds: timeoutMs * 1_000_000)
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 guard self.pendingRuns.contains(runId) else { return }
+                // Auto-refresh history before declaring a failure: the server may
+                // have completed the run while our event stream was wedged. Only
+                // surface the timeout banner if history did not already absorb it.
                 self.clearPendingRun(runId)
-                self.errorText = "Timed out waiting for a reply; try again or refresh."
+                self.errorText = "No activity for a while; refreshing…"
+                Task { [weak self] in
+                    await self?.refreshHistoryAfterRun()
+                    await MainActor.run { [weak self] in
+                        // If the refresh didn't surface a real error, drop the notice.
+                        if self?.errorText == "No activity for a while; refreshing…" {
+                            self?.errorText = nil
+                        }
+                    }
+                }
             }
+        }
+    }
+
+    /// Reset the idle timeout for every still-pending run. Called whenever we
+    /// receive any agent/chat event that proves the server is still working.
+    private func noteRunActivity() {
+        let now = Date()
+        self.pendingRunLastActivityAt = now
+        if self.pendingRunStartedAt == nil, !self.pendingRuns.isEmpty {
+            self.pendingRunStartedAt = now
+        }
+        for runId in self.pendingRuns {
+            self.armPendingRunTimeout(runId: runId)
         }
     }
 
@@ -1081,6 +1139,12 @@ public final class OpenClawChatViewModel {
         self.pendingRuns.remove(runId)
         self.pendingRunTimeoutTasks[runId]?.cancel()
         self.pendingRunTimeoutTasks[runId] = nil
+        if self.pendingRuns.isEmpty {
+            self.pendingRunStartedAt = nil
+            self.pendingRunLastActivityAt = nil
+            self.pendingRunLastToolName = nil
+            self.streamingThinkingText = nil
+        }
     }
 
     private func clearPendingRuns(reason: String?) {
@@ -1089,6 +1153,10 @@ public final class OpenClawChatViewModel {
         }
         self.pendingRunTimeoutTasks.removeAll()
         self.pendingRuns.removeAll()
+        self.pendingRunStartedAt = nil
+        self.pendingRunLastActivityAt = nil
+        self.pendingRunLastToolName = nil
+        self.streamingThinkingText = nil
         if let reason, !reason.isEmpty {
             self.errorText = reason
         }

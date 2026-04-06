@@ -83,6 +83,10 @@ fun ChatSheetContent(viewModel: MainViewModel) {
   val mainSessionKey by viewModel.mainSessionKey.collectAsState()
   val thinkingLevel by viewModel.chatThinkingLevel.collectAsState()
   val streamingAssistantText by viewModel.chatStreamingAssistantText.collectAsState()
+  val streamingThinkingText by viewModel.chatStreamingThinkingText.collectAsState()
+  val pendingRunStartedAtMs by viewModel.chatPendingRunStartedAtMs.collectAsState()
+  val pendingRunLastActivityAtMs by viewModel.chatPendingRunLastActivityAtMs.collectAsState()
+  val pendingRunLastToolName by viewModel.chatPendingRunLastToolName.collectAsState()
   val pendingToolCalls by viewModel.chatPendingToolCalls.collectAsState()
   val sessions by viewModel.chatSessions.collectAsState()
   val chatDraft by viewModel.chatDraft.collectAsState()
@@ -156,6 +160,10 @@ fun ChatSheetContent(viewModel: MainViewModel) {
       pendingRunCount = pendingRunCount,
       pendingToolCalls = pendingToolCalls,
       streamingAssistantText = streamingAssistantText,
+      streamingThinkingText = streamingThinkingText,
+      pendingRunStartedAtMs = pendingRunStartedAtMs,
+      pendingRunLastActivityAtMs = pendingRunLastActivityAtMs,
+      pendingRunLastToolName = pendingRunLastToolName,
       healthOk = healthOk,
       modifier = Modifier.weight(1f, fill = true),
     )

@@ -580,6 +580,10 @@ class NodeRuntime(
   val chatHealthOk: StateFlow<Boolean> = chat.healthOk
   val chatThinkingLevel: StateFlow<String> = chat.thinkingLevel
   val chatStreamingAssistantText: StateFlow<String?> = chat.streamingAssistantText
+  val chatStreamingThinkingText: StateFlow<String?> = chat.streamingThinkingText
+  val chatPendingRunStartedAtMs: StateFlow<Long?> = chat.pendingRunStartedAtMs
+  val chatPendingRunLastActivityAtMs: StateFlow<Long?> = chat.pendingRunLastActivityAtMs
+  val chatPendingRunLastToolName: StateFlow<String?> = chat.pendingRunLastToolName
   val chatPendingToolCalls: StateFlow<List<ChatPendingToolCall>> = chat.pendingToolCalls
   val chatSessions: StateFlow<List<ChatSessionEntry>> = chat.sessions
   val pendingRunCount: StateFlow<Int> = chat.pendingRunCount

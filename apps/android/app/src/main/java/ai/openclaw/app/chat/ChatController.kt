@@ -49,6 +49,18 @@ class ChatController(
   private val _streamingAssistantText = MutableStateFlow<String?>(null)
   val streamingAssistantText: StateFlow<String?> = _streamingAssistantText.asStateFlow()
 
+  private val _streamingThinkingText = MutableStateFlow<String?>(null)
+  val streamingThinkingText: StateFlow<String?> = _streamingThinkingText.asStateFlow()
+
+  private val _pendingRunStartedAtMs = MutableStateFlow<Long?>(null)
+  val pendingRunStartedAtMs: StateFlow<Long?> = _pendingRunStartedAtMs.asStateFlow()
+
+  private val _pendingRunLastActivityAtMs = MutableStateFlow<Long?>(null)
+  val pendingRunLastActivityAtMs: StateFlow<Long?> = _pendingRunLastActivityAtMs.asStateFlow()
+
+  private val _pendingRunLastToolName = MutableStateFlow<String?>(null)
+  val pendingRunLastToolName: StateFlow<String?> = _pendingRunLastToolName.asStateFlow()
+
   private val pendingToolCallsById = ConcurrentHashMap<String, ChatPendingToolCall>()
   private val _pendingToolCalls = MutableStateFlow<List<ChatPendingToolCall>>(emptyList())
   val pendingToolCalls: StateFlow<List<ChatPendingToolCall>> = _pendingToolCalls.asStateFlow()
@@ -58,7 +70,10 @@ class ChatController(
 
   private val pendingRuns = mutableSetOf<String>()
   private val pendingRunTimeoutJobs = ConcurrentHashMap<String, Job>()
-  private val pendingRunTimeoutMs = 120_000L
+  // Idle timeout: how long the client waits without ANY agent/chat activity before
+  // declaring a run timed out. The timeout is rearmed whenever an event arrives for
+  // the run, so genuinely long-running tasks that keep streaming progress stay alive.
+  private val pendingRunIdleTimeoutMs = 180_000L
 
   private var lastHealthPollAtMs: Long? = null
 
@@ -188,6 +203,7 @@ class ChatController(
 
     _errorText.value = null
     _streamingAssistantText.value = null
+    _streamingThinkingText.value = null
     pendingToolCallsById.clear()
     publishPendingToolCalls()
 
@@ -351,6 +367,8 @@ class ChatController(
       "delta" -> {
         // Only show streaming text for runs we initiated
         if (!isPending) return
+        // Non-terminal chat event for our run still proves the server is alive.
+        noteRunActivity()
         val text = parseAssistantDeltaText(payload)
         if (!text.isNullOrEmpty()) {
           _streamingAssistantText.value = text
@@ -364,6 +382,8 @@ class ChatController(
         pendingToolCallsById.clear()
         publishPendingToolCalls()
         _streamingAssistantText.value = null
+        _streamingThinkingText.value = null
+        _pendingRunLastToolName.value = null
         scope.launch {
           try {
             val historyJson =
@@ -388,11 +408,30 @@ class ChatController(
     val stream = payload["stream"].asStringOrNull()
     val data = payload["data"].asObjectOrNull()
 
+    // Any agent event for a run we are tracking counts as activity. Reset the
+    // idle timeout so long-running tasks that keep emitting events do not get
+    // reaped just because the model has not produced a final reply yet.
+    noteRunActivity()
+
     when (stream) {
       "assistant" -> {
         val text = data?.get("text")?.asStringOrNull()
         if (!text.isNullOrEmpty()) {
           _streamingAssistantText.value = text
+        }
+      }
+      "thinking", "reasoning" -> {
+        // Render the model's running thinking instead of leaving the user to
+        // stare at bouncing dots. Prefer the cumulative `text`; fall back to
+        // appending the delta when only the delta is provided.
+        val text = data?.get("text")?.asStringOrNull()
+        if (!text.isNullOrEmpty()) {
+          _streamingThinkingText.value = text
+        } else {
+          val delta = data?.get("delta")?.asStringOrNull()
+          if (!delta.isNullOrEmpty()) {
+            _streamingThinkingText.value = (_streamingThinkingText.value ?: "") + delta
+          }
         }
       }
       "tool" -> {
@@ -413,9 +452,11 @@ class ChatController(
               isError = null,
             )
           publishPendingToolCalls()
+          _pendingRunLastToolName.value = name
         } else if (phase == "result") {
           pendingToolCallsById.remove(toolCallId)
           publishPendingToolCalls()
+          _pendingRunLastToolName.value = name
         }
       }
       "error" -> {
@@ -449,25 +490,75 @@ class ChatController(
   }
 
   private fun armPendingRunTimeout(runId: String) {
+    val now = System.currentTimeMillis()
+    if (_pendingRunStartedAtMs.value == null) {
+      _pendingRunStartedAtMs.value = now
+    }
+    _pendingRunLastActivityAtMs.value = now
     pendingRunTimeoutJobs[runId]?.cancel()
     pendingRunTimeoutJobs[runId] =
       scope.launch {
-        delay(pendingRunTimeoutMs)
+        delay(pendingRunIdleTimeoutMs)
         val stillPending =
           synchronized(pendingRuns) {
             pendingRuns.contains(runId)
           }
         if (!stillPending) return@launch
+        // Auto-refresh history before declaring a failure: the server may have
+        // completed the run while our event stream was wedged. Only surface the
+        // notice if history did not already absorb it.
         clearPendingRun(runId)
-        _errorText.value = "Timed out waiting for a reply; try again or refresh."
+        _errorText.value = "No activity for a while; refreshing…"
+        try {
+          val historyJson =
+            session.request("chat.history", """{"sessionKey":"${_sessionKey.value}"}""")
+          val history =
+            parseHistory(historyJson, sessionKey = _sessionKey.value, previousMessages = _messages.value)
+          _messages.value = history.messages
+          _sessionId.value = history.sessionId
+          history.thinkingLevel?.trim()?.takeIf { it.isNotEmpty() }?.let { _thinkingLevel.value = it }
+          if (_errorText.value == "No activity for a while; refreshing…") {
+            _errorText.value = null
+          }
+        } catch (_: Throwable) {
+          // best-effort; leave the notice in place
+        }
       }
+  }
+
+  /**
+   * Reset the idle timeout for every still-pending run. Called whenever we
+   * receive any agent/chat event that proves the server is still working.
+   */
+  private fun noteRunActivity() {
+    val now = System.currentTimeMillis()
+    _pendingRunLastActivityAtMs.value = now
+    val runIds =
+      synchronized(pendingRuns) {
+        if (pendingRuns.isEmpty()) return
+        if (_pendingRunStartedAtMs.value == null) {
+          _pendingRunStartedAtMs.value = now
+        }
+        pendingRuns.toList()
+      }
+    for (runId in runIds) {
+      armPendingRunTimeout(runId)
+    }
   }
 
   private fun clearPendingRun(runId: String) {
     pendingRunTimeoutJobs.remove(runId)?.cancel()
-    synchronized(pendingRuns) {
-      pendingRuns.remove(runId)
-      _pendingRunCount.value = pendingRuns.size
+    val empty =
+      synchronized(pendingRuns) {
+        pendingRuns.remove(runId)
+        _pendingRunCount.value = pendingRuns.size
+        pendingRuns.isEmpty()
+      }
+    if (empty) {
+      _pendingRunStartedAtMs.value = null
+      _pendingRunLastActivityAtMs.value = null
+      _pendingRunLastToolName.value = null
+      _streamingThinkingText.value = null
     }
   }
 
@@ -480,6 +571,10 @@ class ChatController(
       pendingRuns.clear()
       _pendingRunCount.value = 0
     }
+    _pendingRunStartedAtMs.value = null
+    _pendingRunLastActivityAtMs.value = null
+    _pendingRunLastToolName.value = null
+    _streamingThinkingText.value = null
   }
 
   private fun parseHistory(

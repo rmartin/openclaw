@@ -119,6 +119,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
   val chatHealthOk: StateFlow<Boolean> = runtimeState(initial = false) { it.chatHealthOk }
   val chatThinkingLevel: StateFlow<String> = runtimeState(initial = "off") { it.chatThinkingLevel }
   val chatStreamingAssistantText: StateFlow<String?> = runtimeState(initial = null) { it.chatStreamingAssistantText }
+  val chatStreamingThinkingText: StateFlow<String?> = runtimeState(initial = null) { it.chatStreamingThinkingText }
+  val chatPendingRunStartedAtMs: StateFlow<Long?> = runtimeState(initial = null) { it.chatPendingRunStartedAtMs }
+  val chatPendingRunLastActivityAtMs: StateFlow<Long?> = runtimeState(initial = null) { it.chatPendingRunLastActivityAtMs }
+  val chatPendingRunLastToolName: StateFlow<String?> = runtimeState(initial = null) { it.chatPendingRunLastToolName }
   val chatPendingToolCalls: StateFlow<List<ChatPendingToolCall>> = runtimeState(initial = emptyList()) { it.chatPendingToolCalls }
   val chatSessions: StateFlow<List<ChatSessionEntry>> = runtimeState(initial = emptyList()) { it.chatSessions }
   val pendingRunCount: StateFlow<Int> = runtimeState(initial = 0) { it.pendingRunCount }

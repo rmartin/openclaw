@@ -32,6 +32,10 @@ fun ChatMessageListCard(
   pendingRunCount: Int,
   pendingToolCalls: List<ChatPendingToolCall>,
   streamingAssistantText: String?,
+  streamingThinkingText: String? = null,
+  pendingRunStartedAtMs: Long? = null,
+  pendingRunLastActivityAtMs: Long? = null,
+  pendingRunLastToolName: String? = null,
   healthOk: Boolean,
   modifier: Modifier = Modifier,
 ) {
@@ -74,7 +78,12 @@ fun ChatMessageListCard(
 
       if (pendingRunCount > 0) {
         item(key = "typing") {
-          ChatTypingIndicatorBubble()
+          ChatTypingIndicatorBubble(
+            thinkingText = streamingThinkingText,
+            startedAtMs = pendingRunStartedAtMs,
+            lastActivityAtMs = pendingRunLastActivityAtMs,
+            lastToolName = pendingRunLastToolName,
+          )
         }
       }
 

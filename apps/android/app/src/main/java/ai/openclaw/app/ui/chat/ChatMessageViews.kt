@@ -14,6 +14,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -128,19 +130,95 @@ private fun ChatMessageBody(content: List<ChatMessageContent>, textColor: Color)
 }
 
 @Composable
-fun ChatTypingIndicatorBubble() {
+fun ChatTypingIndicatorBubble(
+  thinkingText: String? = null,
+  startedAtMs: Long? = null,
+  lastActivityAtMs: Long? = null,
+  lastToolName: String? = null,
+) {
   ChatBubbleContainer(
     style = bubbleStyle("assistant"),
     roleLabel = roleLabel("assistant"),
   ) {
-    Row(
-      verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-      DotPulse(color = mobileTextSecondary)
-      Text("Thinking...", style = mobileCallout, color = mobileTextSecondary)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        DotPulse(color = mobileTextSecondary)
+        if (startedAtMs != null) {
+          // Tick once a second so the user can see the run is making forward
+          // progress instead of having to ask the agent for a status update.
+          val nowMs by produceState(initialValue = System.currentTimeMillis(), key1 = startedAtMs) {
+            while (true) {
+              value = System.currentTimeMillis()
+              kotlinx.coroutines.delay(1000)
+            }
+          }
+          Text(
+            text = formatStatusLine(
+              nowMs = nowMs,
+              startedAtMs = startedAtMs,
+              lastActivityAtMs = lastActivityAtMs,
+              lastToolName = lastToolName,
+            ),
+            style = mobileCaption1,
+            color = mobileTextSecondary,
+            fontFamily = FontFamily.Monospace,
+          )
+        } else {
+          Text("Thinking...", style = mobileCallout, color = mobileTextSecondary)
+        }
+      }
+
+      val thinkingTrimmed = thinkingText?.trim().orEmpty()
+      if (thinkingTrimmed.isNotEmpty()) {
+        // Surface the model's running thinking so the user can see what it is
+        // doing during long-running runs, instead of just bouncing dots.
+        Text(
+          text = tailLines(thinkingTrimmed, maxLines = 6),
+          style = mobileCaption1,
+          color = mobileTextSecondary,
+        )
+      }
     }
   }
+}
+
+private fun formatStatusLine(
+  nowMs: Long,
+  startedAtMs: Long,
+  lastActivityAtMs: Long?,
+  lastToolName: String?,
+): String {
+  val elapsedMs = (nowMs - startedAtMs).coerceAtLeast(0L)
+  val builder = StringBuilder("Working… ").append(formatElapsed(elapsedMs))
+  if (!lastToolName.isNullOrEmpty()) {
+    builder.append(" · ").append(lastToolName)
+  } else if (lastActivityAtMs != null) {
+    val idleMs = (nowMs - lastActivityAtMs).coerceAtLeast(0L)
+    if (idleMs > 5_000L) {
+      builder.append(" · idle ").append(formatElapsed(idleMs))
+    }
+  }
+  return builder.toString()
+}
+
+private fun formatElapsed(durationMs: Long): String {
+  val totalSeconds = (durationMs / 1000L).toInt()
+  if (totalSeconds < 60) return "${totalSeconds}s"
+  val minutes = totalSeconds / 60
+  val seconds = totalSeconds % 60
+  if (minutes < 60) return "${minutes}m ${seconds}s"
+  val hours = minutes / 60
+  val remainingMinutes = minutes % 60
+  return "${hours}h ${remainingMinutes}m"
+}
+
+private fun tailLines(text: String, maxLines: Int): String {
+  val lines = text.lines()
+  if (lines.size <= maxLines) return text
+  return lines.takeLast(maxLines).joinToString("\n")
 }
 
 @Composable

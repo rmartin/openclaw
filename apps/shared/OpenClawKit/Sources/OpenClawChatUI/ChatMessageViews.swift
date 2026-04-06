@@ -473,11 +473,44 @@ private struct ToolResultCard: View {
 @MainActor
 struct ChatTypingIndicatorBubble: View {
     let style: OpenClawChatView.Style
+    var thinkingText: String? = nil
+    var startedAt: Date? = nil
+    var lastActivityAt: Date? = nil
+    var lastToolName: String? = nil
+
+    private var hasThinking: Bool {
+        if let thinkingText, !thinkingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+        return false
+    }
 
     var body: some View {
-        HStack(spacing: 10) {
-            TypingDots()
-            Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
+                TypingDots()
+                if self.startedAt != nil {
+                    // Tick once a second so the user can see the run is making forward
+                    // progress instead of having to ask the agent for a status update.
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(self.statusLine(at: context.date))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+
+            if self.hasThinking, let thinking = self.thinkingText {
+                // Surface the model's running thinking so the user can see what it is
+                // doing during long-running runs, instead of just bouncing dots.
+                Text(self.tailLines(of: thinking, maxLines: 6))
+                    .font(.system(size: 13).italic())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.vertical, self.style == .standard ? 12 : 10)
         .padding(.horizontal, self.style == .standard ? 12 : 14)
@@ -490,11 +523,44 @@ struct ChatTypingIndicatorBubble: View {
         .frame(maxWidth: ChatUIConstants.bubbleMaxWidth, alignment: .leading)
         .focusable(false)
     }
-}
 
-extension ChatTypingIndicatorBubble: @MainActor Equatable {
-    static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.style == rhs.style
+    private func statusLine(at now: Date) -> String {
+        guard let startedAt else { return "" }
+        let elapsed = max(0, now.timeIntervalSince(startedAt))
+        var line = "Working… " + Self.formatElapsed(elapsed)
+        if let tool = self.lastToolName, !tool.isEmpty {
+            line += " · " + tool
+        } else if let lastActivityAt {
+            let idle = max(0, now.timeIntervalSince(lastActivityAt))
+            if idle > 5 {
+                line += " · idle " + Self.formatElapsed(idle)
+            }
+        }
+        return line
+    }
+
+    private static func formatElapsed(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        if total < 60 {
+            return "\(total)s"
+        }
+        let mins = total / 60
+        let secs = total % 60
+        if mins < 60 {
+            return "\(mins)m \(secs)s"
+        }
+        let hours = mins / 60
+        let remainingMins = mins % 60
+        return "\(hours)h \(remainingMins)m"
+    }
+
+    private func tailLines(of text: String, maxLines: Int) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = trimmed.split(whereSeparator: \.isNewline)
+        if lines.count <= maxLines {
+            return trimmed
+        }
+        return lines.suffix(maxLines).joined(separator: "\n")
     }
 }
 
