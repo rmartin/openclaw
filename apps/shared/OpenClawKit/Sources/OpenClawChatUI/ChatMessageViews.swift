@@ -530,11 +530,25 @@ struct ChatTypingIndicatorBubble: View {
         var line = "Working… " + Self.formatElapsed(elapsed)
         if let tool = self.lastToolName, !tool.isEmpty {
             line += " · " + tool
-        } else if let lastActivityAt {
-            let idle = max(0, now.timeIntervalSince(lastActivityAt))
-            if idle > 5 {
-                line += " · idle " + Self.formatElapsed(idle)
-            }
+            return line
+        }
+        // Only annotate "quiet" when we have *prior* activity that has gone
+        // stale. If lastActivityAt == startedAt the run literally just began
+        // (the model is thinking, nothing has streamed yet) and showing
+        // "idle Xs" alongside "Working… Xs" with the same value looks like a
+        // bug — the run is not idle, it is thinking. Treat anything within
+        // ~1s of start as "no activity yet" and bail.
+        guard let lastActivityAt,
+              lastActivityAt.timeIntervalSince(startedAt) > 1
+        else {
+            return line
+        }
+        let quiet = max(0, now.timeIntervalSince(lastActivityAt))
+        if quiet > 8 {
+            // Use "quiet" instead of "idle" — the run is still active, we just
+            // have not seen a stream event in a while (e.g. a long tool call
+            // or model deliberation between tool calls).
+            line += " · quiet " + Self.formatElapsed(quiet)
         }
         return line
     }
